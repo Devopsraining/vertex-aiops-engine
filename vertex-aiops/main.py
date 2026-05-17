@@ -1,9 +1,9 @@
 import os
 import json
 
-import vertexai
-
 from github import Github
+
+import vertexai
 
 from vertexai.generative_models import GenerativeModel
 
@@ -19,16 +19,7 @@ REPO_NAME = os.environ.get("REPO_NAME")
 HELM_PATH = os.environ.get("HELM_PATH")
 
 
-vertexai.init(
-    project=PROJECT_ID,
-    location=REGION
-)
-
-
-model = GenerativeModel("gemini-2.0-flash-001")
-
-
-def update_helm_values(replicas):
+def update_helm_values(max_replicas, min_replicas=1):
 
     g = Github(GITHUB_TOKEN)
 
@@ -42,34 +33,50 @@ def update_helm_values(replicas):
 
     updated_lines = []
 
-    found = False
+    inside_autoscaling = False
 
     for line in content.splitlines():
 
-        if line.startswith("replicaCount:"):
+        stripped = line.strip()
 
-            updated_lines.append(f"replicaCount: {replicas}")
+        if stripped.startswith("autoscaling:"):
 
-            found = True
-
-        else:
+            inside_autoscaling = True
 
             updated_lines.append(line)
 
-    if not found:
+            continue
 
-        updated_lines.append(f"replicaCount: {replicas}")
+        if inside_autoscaling and stripped.startswith("minReplicas:"):
+
+            indent = line[:len(line)-len(line.lstrip())]
+
+            updated_lines.append(
+                f"{indent}minReplicas: {min_replicas}"
+            )
+
+            continue
+
+        if inside_autoscaling and stripped.startswith("maxReplicas:"):
+
+            indent = line[:len(line)-len(line.lstrip())]
+
+            updated_lines.append(
+                f"{indent}maxReplicas: {max_replicas}"
+            )
+
+            continue
+
+        updated_lines.append(line)
 
     updated_content = "\n".join(updated_lines)
 
     repo.update_file(
         path=file_path,
-        message=f"AIOps scaling replicas to {replicas}",
+        message=f"AIOps updating HPA maxReplicas to {max_replicas}",
         content=updated_content,
         sha=file.sha
     )
-
-    print("GitHub updated successfully")
 
 
 def aiops(request):
@@ -78,25 +85,46 @@ def aiops(request):
 
         print("AIOps Triggered")
 
+        vertexai.init(
+            project=PROJECT_ID,
+            location="us-central1"
+        )
+
+        model = GenerativeModel("gemini-2.5-pro")
+
         prompt = """
-        CPU spike prediction detected.
+        Kubernetes CPU saturation predicted.
 
-        Decide:
-        1. scale_up
-        2. recommended replicas
+        Existing HPA:
+        minReplicas=1
+        maxReplicas=5
 
-        Return JSON only.
+        Historical spikes:
+        every 15 mins
+        duration 5 mins
+
+        Decide scaling.
+
+        Return ONLY JSON.
 
         Example:
+
         {
-          "action": "scale_up",
-          "replicas": 5
+          "action":"scale_up",
+          "maxReplicas":8,
+          "minReplicas":2
         }
         """
 
         response = model.generate_content(prompt)
 
-        cleaned = response.text.replace("```json", "").replace("```", "").strip()
+        cleaned = response.text.replace(
+            "```json",
+            ""
+        ).replace(
+            "```",
+            ""
+        ).strip()
 
         print(cleaned)
 
@@ -104,15 +132,27 @@ def aiops(request):
 
         action = decision.get("action")
 
-        replicas = decision.get("replicas")
-
         if action == "scale_up":
 
-            update_helm_values(replicas)
+            max_replicas = decision.get(
+                "maxReplicas",
+                5
+            )
+
+            min_replicas = decision.get(
+                "minReplicas",
+                1
+            )
+
+            update_helm_values(
+                max_replicas,
+                min_replicas
+            )
 
             return {
                 "status": "success",
-                "replicas": replicas
+                "maxReplicas": max_replicas,
+                "minReplicas": min_replicas
             }
 
         return {
