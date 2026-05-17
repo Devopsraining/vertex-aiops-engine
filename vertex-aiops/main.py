@@ -1,124 +1,102 @@
-import os
 import json
-import yaml
-
-import vertexai
-
+import os
+import textwrap
 from github import Github
-
+import vertexai
 from vertexai.generative_models import GenerativeModel
 
-PROJECT_ID = os.environ["PROJECT_ID"]
+# ENV VARIABLES
+PROJECT_ID = os.environ.get("PROJECT_ID")
+REGION = os.environ.get("REGION")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+REPO_NAME = os.environ.get("REPO_NAME")
+HELM_PATH = os.environ.get("HELM_PATH")
 
-REGION = os.environ["REGION"]
+# INIT VERTEX AI
+vertexai.init(project=PROJECT_ID, location=REGION)
 
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-
-REPO_NAME = os.environ["REPO_NAME"]
-
-VALUES_FILE = "fraud-helm/ecommerce-frontend/values.yaml"
-
-vertexai.init(
-    project=PROJECT_ID,
-    location=REGION
-)
-
+# LOAD GEMINI MODEL
 model = GenerativeModel("gemini-1.5-flash")
 
 
-def aiops(request):
-
-    body = request.get_json()
-
-    cpu = body.get("cpu", 0)
-
-    deployment = body.get(
-        "deployment",
-        "ecom-frontend"
-    )
-
-    replicas = body.get(
-        "replicas",
-        3
-    )
-
-    prompt = f"""
-You are an enterprise AI Ops engine.
-
-Current Kubernetes state:
-
-Deployment: {deployment}
-
-CPU Usage: {cpu}%
-
-Current replicas: {replicas}
-
-Historical pattern:
-- CPU spikes every 15 mins
-- Spike duration = 5 mins
-
-Rules:
-- Scale UP if CPU > 80
-- Scale DOWN if CPU < 35 for long time
-- Max replicas = 4
-- Min replicas = 2
-
-Return ONLY JSON.
-
-Examples:
-
-{{
-  "action":"scale_up",
-  "replicas":4
-}}
-
-OR
-
-{{
-  "action":"scale_down",
-  "replicas":2
-}}
-"""
-
-    response = model.generate_content(prompt)
-
-    text = response.text.strip()
-
-    text = text.replace("```json", "")
-    text = text.replace("```", "")
-
-    decision = json.loads(text)
-
-    target_replicas = decision["replicas"]
-
+def update_helm_and_push(new_replicas):
+    print(f"Updating replicas to {new_replicas}")
     g = Github(GITHUB_TOKEN)
-
     repo = g.get_repo(REPO_NAME)
+    file_path = f"{HELM_PATH}/values.yaml"
+    file = repo.get_contents(file_path)
+    content = file.decoded_content.decode()
+    lines = content.splitlines()
+    updated_lines = []
+    found = False
 
-    contents = repo.get_contents(
-        VALUES_FILE
-    )
+    for line in lines:
+        if line.startswith("replicaCount:"):
+            updated_lines.append(f"replicaCount: {new_replicas}")
+            found = True
+        else:
+            updated_lines.append(line)
 
-    values = yaml.safe_load(
-        contents.decoded_content.decode()
-    )
+    if not found:
+        updated_lines.append(f"replicaCount: {new_replicas}")
 
-    values["replicaCount"] = target_replicas
-
-    updated_yaml = yaml.dump(
-        values,
-        sort_keys=False
-    )
-
+    updated_content = "\n".join(updated_lines)
     repo.update_file(
-        path=VALUES_FILE,
-        message=f"Vertex AI Ops scaling to {target_replicas}",
-        content=updated_yaml,
-        sha=contents.sha,
-        branch="main"
+        path=file_path,
+        message=f"AIOps scaling replicas to {new_replicas}",
+        content=updated_content,
+        sha=file.sha,
     )
+    print("GitHub values.yaml updated successfully")
 
-    return {
-        "status":"success",
-        "decision":decision
-    }
+
+def aiops(request):
+    try:
+        body = request.get_json(silent=True)
+        print("Received Alert:")
+        print(body)
+
+        prompt = textwrap.dedent(
+            """
+            You are an AI SRE engineer.
+
+            Current Kubernetes frontend workload CPU usage is predicted
+            to reach saturation soon.
+
+            Decide:
+            1. Should replicas increase?
+            2. Recommended replica count.
+
+            Return ONLY JSON.
+
+            Example:
+            {
+              "action": "scale_up",
+              "replicas": 6
+            }
+            """
+        )
+
+        response = model.generate_content(prompt)
+        print("Gemini Response:")
+        print(response.text)
+
+        cleaned = response.text.replace("```json", "").replace("```", "").strip()
+        decision = json.loads(cleaned)
+
+        action = decision.get("action")
+        replicas = decision.get("replicas")
+
+        if action == "scale_up":
+            replicas_int = int(replicas)
+            update_helm_and_push(replicas_int)
+            return {
+                "status": "success",
+                "message": f"Scaled to {replicas_int}",
+            }
+
+        return {"status": "no_action"}
+
+    except Exception as e:
+        print(str(e))
+        return {"status": "error", "message": str(e)}, 500
