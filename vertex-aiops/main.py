@@ -1,25 +1,39 @@
 import os
 import json
+import yaml
 
 from github import Github
 
-import vertexai
+import functions_framework
 
+import vertexai
 from vertexai.generative_models import GenerativeModel
 
 
 PROJECT_ID = os.environ.get("PROJECT_ID")
-
 REGION = os.environ.get("REGION")
-
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-
 REPO_NAME = os.environ.get("REPO_NAME")
-
 HELM_PATH = os.environ.get("HELM_PATH")
 
 
-def update_helm_values(max_replicas, min_replicas=1):
+vertexai.init(
+    project=PROJECT_ID,
+    location=REGION
+)
+
+model = GenerativeModel("gemini-2.5-pro")
+
+
+###############################################################
+# GITHUB UPDATE FUNCTION
+###############################################################
+
+def update_helm_values(
+    min_replicas,
+    max_replicas,
+    replica_count
+):
 
     g = Github(GITHUB_TOKEN)
 
@@ -27,136 +41,295 @@ def update_helm_values(max_replicas, min_replicas=1):
 
     file_path = f"{HELM_PATH}/values.yaml"
 
-    file = repo.get_contents(file_path)
+    contents = repo.get_contents(file_path)
 
-    content = file.decoded_content.decode()
+    values = yaml.safe_load(
+        contents.decoded_content
+    )
 
-    updated_lines = []
+    values["autoscaling"]["enabled"] = True
 
-    inside_autoscaling = False
+    values["autoscaling"]["minReplicas"] = min_replicas
 
-    for line in content.splitlines():
+    values["autoscaling"]["maxReplicas"] = max_replicas
 
-        stripped = line.strip()
+    values["replicaCount"] = replica_count
 
-        if stripped.startswith("autoscaling:"):
-
-            inside_autoscaling = True
-
-            updated_lines.append(line)
-
-            continue
-
-        if inside_autoscaling and stripped.startswith("minReplicas:"):
-
-            indent = line[:len(line)-len(line.lstrip())]
-
-            updated_lines.append(
-                f"{indent}minReplicas: {min_replicas}"
-            )
-
-            continue
-
-        if inside_autoscaling and stripped.startswith("maxReplicas:"):
-
-            indent = line[:len(line)-len(line.lstrip())]
-
-            updated_lines.append(
-                f"{indent}maxReplicas: {max_replicas}"
-            )
-
-            continue
-
-        updated_lines.append(line)
-
-    updated_content = "\n".join(updated_lines)
+    updated_yaml = yaml.dump(
+        values,
+        default_flow_style=False
+    )
 
     repo.update_file(
         path=file_path,
-        message=f"AIOps updating HPA maxReplicas to {max_replicas}",
-        content=updated_content,
-        sha=file.sha
+        message=f"AIOps: AI remediation scaling to {replica_count}",
+        content=updated_yaml,
+        sha=contents.sha,
+        branch="main"
     )
 
 
+###############################################################
+# MAIN CLOUD FUNCTION
+###############################################################
+
+@functions_framework.http
 def aiops(request):
 
     try:
 
-        print("AIOps Triggered")
+        #######################################################
+        # DATADOG ALERT
+        #######################################################
 
-        vertexai.init(
-            project=PROJECT_ID,
-            location="us-central1"
+        request_json = request.get_json(
+            silent=True
+        ) or {}
+
+        print("\n==============================")
+        print("DATADOG EVENT")
+        print("==============================")
+
+        print(json.dumps(
+            request_json,
+            indent=2
+        ))
+
+        #######################################################
+        # SIMULATED LIVE TELEMETRY
+        #######################################################
+
+        cluster_context = {
+
+            "service": "ecom-frontend",
+
+            "cpu_history": [
+                22,
+                35,
+                48,
+                67,
+                81,
+                93
+            ],
+
+            "memory_history": [
+                40,
+                41,
+                42,
+                43,
+                44,
+                45
+            ],
+
+            "latency_history_ms": [
+                120,
+                140,
+                180,
+                260,
+                420
+            ],
+
+            "request_rate_rps": [
+                400,
+                600,
+                1000,
+                1800,
+                2600
+            ],
+
+            "restart_count": 0,
+
+            "node_pressure": False,
+
+            "current_replicas": 2,
+
+            "hpa_min_replicas": 1,
+
+            "hpa_max_replicas": 5,
+
+            "traffic_pattern":
+                "CPU spike every 15 minutes lasting 5 minutes",
+
+            "historical_incidents": [
+
+                {
+                    "cpu": 91,
+                    "latency": 380,
+                    "replicas_needed": 8,
+                    "resolved": True
+                },
+
+                {
+                    "cpu": 72,
+                    "latency": 150,
+                    "replicas_needed": 2,
+                    "resolved": True
+                }
+            ]
+        }
+
+        #######################################################
+        # AI REASONING PROMPT
+        #######################################################
+
+        prompt = f"""
+You are an Autonomous AI SRE platform.
+
+Analyze Kubernetes workload telemetry
+and determine the safest remediation strategy.
+
+Telemetry:
+{json.dumps(cluster_context, indent=2)}
+
+Your job:
+
+1. Determine whether remediation is required
+2. Determine whether issue may self-recover
+3. Determine whether scaling frontend is needed
+4. Determine whether node scaling is safer
+5. Assess risk level
+6. Generate confidence score
+7. Explain reasoning
+
+IMPORTANT:
+Do NOT always scale.
+
+Possible decisions:
+- no_action
+- scale_frontend
+- tune_hpa
+- recommend_cluster_autoscaler
+
+Return ONLY valid JSON.
+
+Example:
+
+{{
+  "decision": "scale_frontend",
+  "recommended_replicas": 8,
+  "recommended_min_replicas": 2,
+  "recommended_max_replicas": 10,
+  "risk_level": "high",
+  "confidence": "93%",
+  "reasoning": [
+    "Recurring saturation pattern detected",
+    "Latency increasing rapidly",
+    "Current HPA insufficient"
+  ]
+}}
+"""
+
+        #######################################################
+        # GEMINI AI REASONING
+        #######################################################
+
+        print("\n==============================")
+        print("CALLING GEMINI AI")
+        print("==============================")
+
+        response = model.generate_content(
+            prompt
         )
 
-        model = GenerativeModel("gemini-2.5-pro")
+        ai_response = response.text
 
-        prompt = """
-        Kubernetes CPU saturation predicted.
+        print("\n==============================")
+        print("RAW GEMINI RESPONSE")
+        print("==============================")
 
-        Existing HPA:
-        minReplicas=1
-        maxReplicas=5
+        print(ai_response)
 
-        Historical spikes:
-        every 15 mins
-        duration 5 mins
+        #######################################################
+        # CLEAN RESPONSE
+        #######################################################
 
-        Decide scaling.
-
-        Return ONLY JSON.
-
-        Example:
-
-        {
-          "action":"scale_up",
-          "maxReplicas":8,
-          "minReplicas":2
-        }
-        """
-
-        response = model.generate_content(prompt)
-
-        cleaned = response.text.replace(
+        ai_response = ai_response.replace(
             "```json",
             ""
-        ).replace(
+        )
+
+        ai_response = ai_response.replace(
             "```",
             ""
-        ).strip()
+        )
 
-        print(cleaned)
+        ai_response = ai_response.strip()
 
-        decision = json.loads(cleaned)
+        decision = json.loads(ai_response)
 
-        action = decision.get("action")
+        #######################################################
+        # EXTRACT AI DECISION
+        #######################################################
 
-        if action == "scale_up":
+        ai_decision = decision.get(
+            "decision",
+            "no_action"
+        )
 
-            max_replicas = decision.get(
-                "maxReplicas",
+        #######################################################
+        # AI DECISION LOGGING
+        #######################################################
+
+        print("\n==============================")
+        print("AI DECISION")
+        print("==============================")
+
+        print(json.dumps(
+            decision,
+            indent=2
+        ))
+
+        #######################################################
+        # EXECUTE AI REMEDIATION
+        #######################################################
+
+        if ai_decision == "scale_frontend":
+
+            replicas = decision.get(
+                "recommended_replicas",
                 5
             )
 
             min_replicas = decision.get(
-                "minReplicas",
-                1
+                "recommended_min_replicas",
+                2
+            )
+
+            max_replicas = decision.get(
+                "recommended_max_replicas",
+                10
+            )
+
+            print("\n==============================")
+            print("EXECUTING AI REMEDIATION")
+            print("==============================")
+
+            print(
+                f"Scaling frontend to {replicas}"
             )
 
             update_helm_values(
-                max_replicas,
-                min_replicas
+                min_replicas=min_replicas,
+                max_replicas=max_replicas,
+                replica_count=replicas
             )
 
             return {
                 "status": "success",
-                "maxReplicas": max_replicas,
-                "minReplicas": min_replicas
+                "ai_decision": decision
             }
 
+        #######################################################
+        # NO ACTION PATH
+        #######################################################
+
+        print("\n==============================")
+        print("AI DECIDED NO ACTION")
+        print("==============================")
+
         return {
-            "status": "no_action"
+            "status": "no_action",
+            "ai_decision": decision
         }
 
     except Exception as e:
