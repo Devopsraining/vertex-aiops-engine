@@ -1,102 +1,129 @@
-import json
 import os
-import textwrap
-from github import Github
+import json
+
 import vertexai
+
+from github import Github
+
 from vertexai.generative_models import GenerativeModel
 
-# ENV VARIABLES
+
 PROJECT_ID = os.environ.get("PROJECT_ID")
+
 REGION = os.environ.get("REGION")
+
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+
 REPO_NAME = os.environ.get("REPO_NAME")
+
 HELM_PATH = os.environ.get("HELM_PATH")
 
-# INIT VERTEX AI
-vertexai.init(project=PROJECT_ID, location=REGION)
 
-# LOAD GEMINI MODEL
-model = GenerativeModel("gemini-1.5-flash")
+vertexai.init(
+    project=PROJECT_ID,
+    location=REGION
+)
 
 
-def update_helm_and_push(new_replicas):
-    print(f"Updating replicas to {new_replicas}")
+model = GenerativeModel("gemini-2.0-flash-001")
+
+
+def update_helm_values(replicas):
+
     g = Github(GITHUB_TOKEN)
+
     repo = g.get_repo(REPO_NAME)
+
     file_path = f"{HELM_PATH}/values.yaml"
+
     file = repo.get_contents(file_path)
+
     content = file.decoded_content.decode()
-    lines = content.splitlines()
+
     updated_lines = []
+
     found = False
 
-    for line in lines:
+    for line in content.splitlines():
+
         if line.startswith("replicaCount:"):
-            updated_lines.append(f"replicaCount: {new_replicas}")
+
+            updated_lines.append(f"replicaCount: {replicas}")
+
             found = True
+
         else:
+
             updated_lines.append(line)
 
     if not found:
-        updated_lines.append(f"replicaCount: {new_replicas}")
+
+        updated_lines.append(f"replicaCount: {replicas}")
 
     updated_content = "\n".join(updated_lines)
+
     repo.update_file(
         path=file_path,
-        message=f"AIOps scaling replicas to {new_replicas}",
+        message=f"AIOps scaling replicas to {replicas}",
         content=updated_content,
-        sha=file.sha,
+        sha=file.sha
     )
-    print("GitHub values.yaml updated successfully")
+
+    print("GitHub updated successfully")
 
 
 def aiops(request):
+
     try:
-        body = request.get_json(silent=True)
-        print("Received Alert:")
-        print(body)
 
-        prompt = textwrap.dedent(
-            """
-            You are an AI SRE engineer.
+        print("AIOps Triggered")
 
-            Current Kubernetes frontend workload CPU usage is predicted
-            to reach saturation soon.
+        prompt = """
+        CPU spike prediction detected.
 
-            Decide:
-            1. Should replicas increase?
-            2. Recommended replica count.
+        Decide:
+        1. scale_up
+        2. recommended replicas
 
-            Return ONLY JSON.
+        Return JSON only.
 
-            Example:
-            {
-              "action": "scale_up",
-              "replicas": 6
-            }
-            """
-        )
+        Example:
+        {
+          "action": "scale_up",
+          "replicas": 5
+        }
+        """
 
         response = model.generate_content(prompt)
-        print("Gemini Response:")
-        print(response.text)
 
         cleaned = response.text.replace("```json", "").replace("```", "").strip()
+
+        print(cleaned)
+
         decision = json.loads(cleaned)
 
         action = decision.get("action")
+
         replicas = decision.get("replicas")
 
         if action == "scale_up":
-            replicas_int = int(replicas)
-            update_helm_and_push(replicas_int)
+
+            update_helm_values(replicas)
+
             return {
                 "status": "success",
-                "message": f"Scaled to {replicas_int}",
+                "replicas": replicas
             }
 
-        return {"status": "no_action"}
+        return {
+            "status": "no_action"
+        }
 
     except Exception as e:
+
         print(str(e))
-        return {"status": "error", "message": str(e)}, 500
+
+        return {
+            "status": "error",
+            "message": str(e)
+        }, 500
