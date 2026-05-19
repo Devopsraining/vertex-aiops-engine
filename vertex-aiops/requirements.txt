@@ -1,6 +1,8 @@
 functions-framework==3.*
-google-cloud-aiplatform
+google-cloud-aiplatform==1.93.0
 vertexai
-PyGithub
-PyYAML
+PyGithub==2.6.1
+PyYAML==6.0.2
 requests
+datadog-api-client==2.43.0
+google-cloud-bigquery==3.35.1
