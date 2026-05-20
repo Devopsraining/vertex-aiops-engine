@@ -7,7 +7,7 @@ def get_recent_incidents():
 
     query = """
     SELECT *
-    FROM `YOUR_PROJECT.aiops.incident_history`
+    FROM `devops-492107.aiops.incident_history`
     ORDER BY timestamp DESC
     LIMIT 5
     """

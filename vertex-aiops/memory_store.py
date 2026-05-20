@@ -5,7 +5,9 @@ client = bigquery.Client()
 
 def store_incident(data):
 
-    table_id = "YOUR_PROJECT.aiops.incident_history"
+    table_id = (
+        "devops-492107.aiops.incident_history"
+    )
 
     errors = client.insert_rows_json(
         table_id,
@@ -13,4 +15,9 @@ def store_incident(data):
     )
 
     if errors:
+
         print(errors)
+
+    else:
+
+        print("Incident stored")

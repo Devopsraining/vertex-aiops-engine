@@ -6,3 +6,9 @@ PyYAML==6.0.2
 requests
 datadog-api-client==2.43.0
 google-cloud-bigquery==3.35.1
+kubernetes==32.0.1
+google-cloud-container
+kubernetes
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
